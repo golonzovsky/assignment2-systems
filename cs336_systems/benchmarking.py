@@ -42,6 +42,16 @@ def sync_device(device: str):
         torch.mps.synchronize()
 
 
+@dataclass
+class BenchmarkResult:
+    forward_avg_ms: float
+    forward_std_ms: float
+    backward_avg_ms: float
+    backward_std_ms: float
+    step_avg_ms: float
+    step_std_ms: float
+
+
 def benchmark_model(
     config: ModelConfig,
     size_name: str,
@@ -52,8 +62,8 @@ def benchmark_model(
     warmup_steps: int,
     steps: int,
     device: str,
-) -> tuple[float, float]:
-    """Benchmark a model configuration. Returns (avg_ms, std_ms)."""
+) -> BenchmarkResult:
+    """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
     print(f"\n{'=' * 50}")
     print(
         f"Benchmarking {size_name}: d_model={config.d_model}, d_ff={config.d_ff}, "
@@ -76,24 +86,51 @@ def benchmark_model(
     seq_lengths = torch.randint(1, context_length + 1, (total_steps,))
     batches = [torch.randint(0, vocab_size, (batch_size, int(seq_len)), device=device) for seq_len in seq_lengths]
 
-    # warmup
+    # warmup (full forward + backward)
     for i in range(warmup_steps):
-        model(batches[i])
+        logits = model(batches[i])
+        loss = logits.sum()
+        loss.backward()
+        model.zero_grad()
     sync_device(device)
 
-    # steps - time each individually for std calculation
-    times = []
+    # Benchmark - time forward and backward separately in the same loop
+    forward_times = []
+    backward_times = []
     for i in range(warmup_steps, total_steps):
-        start = timeit.default_timer()
-        model(batches[i])
+        # Time forward
+        fwd_start = timeit.default_timer()
+        logits = model(batches[i])
         sync_device(device)
-        end = timeit.default_timer()
-        times.append(end - start)
+        fwd_end = timeit.default_timer()
+        forward_times.append(fwd_end - fwd_start)
 
-    times_ms = torch.tensor(times) * 1000
-    avg_time = times_ms.mean().item()
-    std_time = times_ms.std().item()
-    print(f"avg time per step: {avg_time:.2f} ± {std_time:.2f} ms")
+        # Compute loss (not timed)
+        loss = logits.sum()
+
+        # Time backward
+        bwd_start = timeit.default_timer()
+        loss.backward()
+        sync_device(device)
+        bwd_end = timeit.default_timer()
+        backward_times.append(bwd_end - bwd_start)
+
+        model.zero_grad()
+
+    forward_times_ms = torch.tensor(forward_times) * 1000
+    backward_times_ms = torch.tensor(backward_times) * 1000
+    step_times_ms = forward_times_ms + backward_times_ms
+
+    forward_avg = forward_times_ms.mean().item()
+    forward_std = forward_times_ms.std().item()
+    backward_avg = backward_times_ms.mean().item()
+    backward_std = backward_times_ms.std().item()
+    step_avg = step_times_ms.mean().item()
+    step_std = step_times_ms.std().item()
+
+    print(f"Forward pass:  {forward_avg:.2f} ± {forward_std:.2f} ms")
+    print(f"Backward pass: {backward_avg:.2f} ± {backward_std:.2f} ms")
+    print(f"Full step:     {step_avg:.2f} ± {step_std:.2f} ms")
 
     # Clean up
     del model
@@ -101,7 +138,14 @@ def benchmark_model(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    return avg_time, std_time
+    return BenchmarkResult(
+        forward_avg_ms=forward_avg,
+        forward_std_ms=forward_std,
+        backward_avg_ms=backward_avg,
+        backward_std_ms=backward_std,
+        step_avg_ms=step_avg,
+        step_std_ms=step_std,
+    )
 
 
 if __name__ == "__main__":
@@ -116,7 +160,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
-    parser.add_argument("--include-backwards", type=bool, default=False)
 
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--context-length", type=int, default=256)
@@ -133,7 +176,7 @@ if __name__ == "__main__":
     results = {}
     for size_name in sizes_to_run:
         config = MODEL_CONFIGS[size_name]
-        avg, std = benchmark_model(
+        result = benchmark_model(
             config=config,
             size_name=size_name,
             vocab_size=args.vocab_size,
@@ -144,11 +187,16 @@ if __name__ == "__main__":
             steps=args.steps,
             device=device,
         )
-        results[size_name] = (avg, std)
+        results[size_name] = result
 
     if len(results) > 1:
         print(f"\n{'=' * 50}")
         print("Summary:")
         print(f"{'=' * 50}")
-        for size_name, (avg, std) in results.items():
-            print(f"{size_name:>8}: {avg:.2f} ± {std:.2f} ms")
+        print(f"{'Size':>8} | {'Forward':>16} | {'Backward':>16} | {'Full Step':>16}")
+        print(f"{'-' * 8}-+-{'-' * 16}-+-{'-' * 16}-+-{'-' * 16}")
+        for size_name, r in results.items():
+            fwd = f"{r.forward_avg_ms:.2f} ± {r.forward_std_ms:.2f}"
+            bwd = f"{r.backward_avg_ms:.2f} ± {r.backward_std_ms:.2f}"
+            step = f"{r.step_avg_ms:.2f} ± {r.step_std_ms:.2f}"
+            print(f"{size_name:>8} | {fwd:>16} | {bwd:>16} | {step:>16}")
