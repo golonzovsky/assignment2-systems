@@ -3,8 +3,12 @@ import timeit
 from dataclasses import dataclass
 
 import torch
+from rich.console import Console
+from rich.table import Table
 
 from cs336_basics.model import BasicsTransformerLM
+
+console = Console()
 
 
 @dataclass
@@ -64,12 +68,11 @@ def benchmark_model(
     device: str,
 ) -> BenchmarkResult:
     """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
-    print(f"\n{'=' * 50}")
-    print(
-        f"Benchmarking {size_name}: d_model={config.d_model}, d_ff={config.d_ff}, "
+    console.rule(f"[bold blue]{size_name}")
+    console.print(
+        f"d_model={config.d_model}, d_ff={config.d_ff}, "
         f"num_layers={config.num_layers}, num_heads={config.num_heads}"
     )
-    print(f"{'=' * 50}")
 
     model = BasicsTransformerLM(
         vocab_size=vocab_size,
@@ -128,9 +131,9 @@ def benchmark_model(
     step_avg = step_times_ms.mean().item()
     step_std = step_times_ms.std().item()
 
-    print(f"Forward pass:  {forward_avg:.2f} ± {forward_std:.2f} ms")
-    print(f"Backward pass: {backward_avg:.2f} ± {backward_std:.2f} ms")
-    print(f"Full step:     {step_avg:.2f} ± {step_std:.2f} ms")
+    console.print(f"  Forward pass:  [green]{forward_avg:.2f}[/green] ± {forward_std:.2f} ms")
+    console.print(f"  Backward pass: [green]{backward_avg:.2f}[/green] ± {backward_std:.2f} ms")
+    console.print(f"  Full step:     [bold green]{step_avg:.2f}[/bold green] ± {step_std:.2f} ms")
 
     # Clean up
     del model
@@ -155,8 +158,7 @@ if __name__ == "__main__":
         "--size",
         type=str,
         default="small",
-        choices=list(MODEL_CONFIGS.keys()) + ["all"],
-        help="Model size to benchmark (or 'all' for sweep)",
+        help="Model size(s) to benchmark: comma-separated (e.g., 'small,medium,large') or 'all'",
     )
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
@@ -169,9 +171,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_default_device()
-    print(f"Using device: {device}")
+    console.print(f"Using device: [bold cyan]{device}[/bold cyan]")
 
-    sizes_to_run = list(MODEL_CONFIGS.keys()) if args.size == "all" else [args.size]
+    if args.size == "all":
+        sizes_to_run = list(MODEL_CONFIGS.keys())
+    else:
+        sizes_to_run = [s.strip() for s in args.size.split(",")]
+        for s in sizes_to_run:
+            if s not in MODEL_CONFIGS:
+                parser.error(f"invalid size '{s}' (choose from {list(MODEL_CONFIGS.keys())})")
 
     results = {}
     for size_name in sizes_to_run:
@@ -190,13 +198,19 @@ if __name__ == "__main__":
         results[size_name] = result
 
     if len(results) > 1:
-        print(f"\n{'=' * 50}")
-        print("Summary:")
-        print(f"{'=' * 50}")
-        print(f"{'Size':>8} | {'Forward':>16} | {'Backward':>16} | {'Full Step':>16}")
-        print(f"{'-' * 8}-+-{'-' * 16}-+-{'-' * 16}-+-{'-' * 16}")
+        console.print()
+        table = Table(title="Summary")
+        table.add_column("Size", style="cyan", justify="right")
+        table.add_column("Forward (ms)", justify="right")
+        table.add_column("Backward (ms)", justify="right")
+        table.add_column("Full Step (ms)", justify="right", style="bold")
+
         for size_name, r in results.items():
-            fwd = f"{r.forward_avg_ms:.2f} ± {r.forward_std_ms:.2f}"
-            bwd = f"{r.backward_avg_ms:.2f} ± {r.backward_std_ms:.2f}"
-            step = f"{r.step_avg_ms:.2f} ± {r.step_std_ms:.2f}"
-            print(f"{size_name:>8} | {fwd:>16} | {bwd:>16} | {step:>16}")
+            table.add_row(
+                size_name,
+                f"{r.forward_avg_ms:.2f} ± {r.forward_std_ms:.2f}",
+                f"{r.backward_avg_ms:.2f} ± {r.backward_std_ms:.2f}",
+                f"{r.step_avg_ms:.2f} ± {r.step_std_ms:.2f}",
+            )
+
+        console.print(table)
