@@ -68,12 +68,6 @@ def benchmark_model(
     device: str,
 ) -> BenchmarkResult:
     """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
-    console.rule(f"[bold blue]{size_name}")
-    console.print(
-        f"d_model={config.d_model}, d_ff={config.d_ff}, "
-        f"num_layers={config.num_layers}, num_heads={config.num_heads}"
-    )
-
     model = BasicsTransformerLM(
         vocab_size=vocab_size,
         context_length=context_length,
@@ -83,6 +77,14 @@ def benchmark_model(
         num_heads=config.num_heads,
         num_layers=config.num_layers,
     ).to(device)
+
+    num_params = sum(p.numel() for p in model.parameters())
+    console.rule(f"[bold blue]{size_name}")
+    console.print(
+        f"d_model={config.d_model}, d_ff={config.d_ff}, "
+        f"num_layers={config.num_layers}, num_heads={config.num_heads}, "
+        f"params={num_params / 1e6:.1f}M"
+    )
 
     # Pre-generate all batches with varying sequence lengths
     total_steps = warmup_steps + steps
