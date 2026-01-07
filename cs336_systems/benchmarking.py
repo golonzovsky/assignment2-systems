@@ -112,6 +112,7 @@ def benchmark_model(
 
         # Compute loss (not timed)
         loss = logits.sum()
+        sync_device(device)
 
         # Time backward
         bwd_start = timeit.default_timer()
