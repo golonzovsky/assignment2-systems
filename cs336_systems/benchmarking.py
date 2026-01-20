@@ -102,26 +102,27 @@ def benchmark_model(
     # Benchmark - time forward and backward separately in the same loop
     forward_times = []
     backward_times = []
-    for i in range(warmup_steps, total_steps):
-        # Time forward
-        fwd_start = timeit.default_timer()
-        logits = model(batches[i])
-        sync_device(device)
-        fwd_end = timeit.default_timer()
-        forward_times.append(fwd_end - fwd_start)
+    with torch.autograd.profiler.emit_nvtx():
+        for i in range(warmup_steps, total_steps):
+            # Time forward
+            fwd_start = timeit.default_timer()
+            logits = model(batches[i])
+            sync_device(device)
+            fwd_end = timeit.default_timer()
+            forward_times.append(fwd_end - fwd_start)
 
-        # Compute loss (not timed)
-        loss = logits.sum()
-        sync_device(device)
+            # Compute loss (not timed)
+            loss = logits.sum()
+            sync_device(device)
 
-        # Time backward
-        bwd_start = timeit.default_timer()
-        loss.backward()
-        sync_device(device)
-        bwd_end = timeit.default_timer()
-        backward_times.append(bwd_end - bwd_start)
+            # Time backward
+            bwd_start = timeit.default_timer()
+            loss.backward()
+            sync_device(device)
+            bwd_end = timeit.default_timer()
+            backward_times.append(bwd_end - bwd_start)
 
-        model.zero_grad()
+            model.zero_grad()
 
     forward_times_ms = torch.tensor(forward_times) * 1000
     backward_times_ms = torch.tensor(backward_times) * 1000
