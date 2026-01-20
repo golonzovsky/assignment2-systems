@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import timeit
 from dataclasses import dataclass
 
@@ -91,38 +92,45 @@ def benchmark_model(
     seq_lengths = torch.randint(1, context_length + 1, (total_steps,))
     batches = [torch.randint(0, vocab_size, (batch_size, int(seq_len)), device=device) for seq_len in seq_lengths]
 
-    # warmup (full forward + backward)
-    for i in range(warmup_steps):
-        logits = model(batches[i])
-        loss = logits.sum()
-        loss.backward()
-        model.zero_grad()
-    sync_device(device)
-
-    # Benchmark - time forward and backward separately in the same loop
     forward_times = []
     backward_times = []
-    with torch.autograd.profiler.emit_nvtx():
-        for i in range(warmup_steps, total_steps):
-            # Time forward
-            fwd_start = timeit.default_timer()
-            logits = model(batches[i])
-            sync_device(device)
-            fwd_end = timeit.default_timer()
-            forward_times.append(fwd_end - fwd_start)
+    nvtx_context = torch.autograd.profiler.emit_nvtx() if device == "cuda" else contextlib.nullcontext()
+    with nvtx_context:
+        # warmup (full forward + backward)
+        with torch.profiler.record_function("warmup"):
+            for i in range(warmup_steps):
+                with torch.profiler.record_function("warmup_forward"):
+                    logits = model(batches[i])
+                loss = logits.sum()
+                with torch.profiler.record_function("warmup_backward"):
+                    loss.backward()
+                model.zero_grad()
+        sync_device(device)
 
-            # Compute loss (not timed)
-            loss = logits.sum()
-            sync_device(device)
+        # Benchmark - time forward and backward separately in the same loop
+        with torch.profiler.record_function("benchmark"):
+            for i in range(warmup_steps, total_steps):
+                # Time forward
+                fwd_start = timeit.default_timer()
+                with torch.profiler.record_function("forward"):
+                    logits = model(batches[i])
+                sync_device(device)
+                fwd_end = timeit.default_timer()
+                forward_times.append(fwd_end - fwd_start)
 
-            # Time backward
-            bwd_start = timeit.default_timer()
-            loss.backward()
-            sync_device(device)
-            bwd_end = timeit.default_timer()
-            backward_times.append(bwd_end - bwd_start)
+                # Compute loss (not timed)
+                loss = logits.sum()
+                sync_device(device)
 
-            model.zero_grad()
+                # Time backward
+                bwd_start = timeit.default_timer()
+                with torch.profiler.record_function("backward"):
+                    loss.backward()
+                sync_device(device)
+                bwd_end = timeit.default_timer()
+                backward_times.append(bwd_end - bwd_start)
+
+                model.zero_grad()
 
     forward_times_ms = torch.tensor(forward_times) * 1000
     backward_times_ms = torch.tensor(backward_times) * 1000
