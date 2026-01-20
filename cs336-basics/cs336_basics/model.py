@@ -13,6 +13,18 @@ import torch.nn as nn
 from torch import Tensor
 from torch.profiler import record_function
 from jaxtyping import Float, Bool, Int
+from functools import wraps
+
+
+def record(name: str):
+    """Decorator to wrap a function with torch.profiler.record_function."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with record_function(name):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 from .nn_utils import softmax
@@ -37,6 +49,7 @@ class Linear(nn.Module):
             nn.init.trunc_normal_(torch.empty(d_out, d_in), std=std, a=-3 * std, b=3 * std), requires_grad=True
         )
 
+    @record("linear")
     def forward(self, x: Float[Tensor, " ... d_in"]) -> Float[Tensor, " ... d_out"]:
         return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
@@ -52,6 +65,7 @@ class Embedding(nn.Module):
             nn.init.trunc_normal_(torch.empty(vocab_size, d_model), std=std, a=-3 * std, b=3 * std), requires_grad=True
         )
 
+    @record("embedding")
     def forward(self, token_ids: Int[Tensor, " ..."]) -> Float[Tensor, " ... d_model"]:
         return self.weight[token_ids, :]
 
@@ -84,6 +98,7 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size, device=device))
         self.eps = eps
 
+    @record("rmsnorm")
     def forward(self, x):
         """
         Args:
@@ -129,6 +144,7 @@ class RotaryEmbedding(nn.Module):
         cos, sin = torch.cos(freqs), torch.sin(freqs)
         return torch.stack((cos, sin))
 
+    @record("rope")
     def forward(self, x: Float[Tensor, " ... seq d"], pos_ids: Int[Tensor, " ... seq"]) -> Float[Tensor, " ... seq d"]:
         x1, x2 = rearrange(x, "... (half_d xy) -> xy ... half_d", xy=2)
 
@@ -359,6 +375,7 @@ class TransformerBlock(nn.Module):
         self.ln1 = RMSNorm(d_model)
         self.ln2 = RMSNorm(d_model)
 
+    @record("transformer_block")
     def forward(self, x: torch.Tensor):
         """
         Args:
@@ -387,10 +404,12 @@ class SwiGLU(nn.Module):
         self.w2 = Linear(d_ff, d_model)
         self.w3 = Linear(d_model, d_ff)
 
+    @record("swiglu")
     def forward(self, x):
         return self.w2(silu(self.w1(x)) * self.w3(x))
 
 
+@record("scaled_dot_product_attention")
 def scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys    d_k"],
@@ -473,6 +492,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
         self.positional_encoder = positional_encoder  # RoPE
 
+    @record("attention")
     def forward(
         self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None
     ) -> Float[Tensor, " ... seq d_v"]:
@@ -526,5 +546,6 @@ class CausalMultiHeadSelfAttention(nn.Module):
         return output
 
 
+@record("silu")
 def silu(x: torch.Tensor):
     return x * torch.sigmoid(x)
