@@ -67,6 +67,7 @@ def benchmark_model(
     warmup_steps: int,
     steps: int,
     device: str,
+    bf16: bool = False,
 ) -> BenchmarkResult:
     """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
     model = BasicsTransformerLM(
@@ -95,7 +96,8 @@ def benchmark_model(
     forward_times = []
     backward_times = []
     nvtx_context = torch.autograd.profiler.emit_nvtx() if device == "cuda" else contextlib.nullcontext()
-    with nvtx_context:
+    autocast_context = torch.autocast(device, dtype=torch.bfloat16) if bf16 else contextlib.nullcontext()
+    with nvtx_context, autocast_context:
         # warmup (full forward + backward)
         with torch.profiler.record_function("warmup"):
             for i in range(warmup_steps):
@@ -174,6 +176,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision")
 
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--context-length", type=int, default=256)
@@ -183,7 +186,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_default_device()
-    console.print(f"Using device: [bold cyan]{device}[/bold cyan]")
+    console.print(f"Using device: [bold cyan]{device}[/bold cyan]" + (", [bold magenta]bf16[/bold magenta]" if args.bf16 else ""))
 
     if args.size == "all":
         sizes_to_run = list(MODEL_CONFIGS.keys())
@@ -206,6 +209,7 @@ if __name__ == "__main__":
             warmup_steps=args.warmup_steps,
             steps=args.steps,
             device=device,
+            bf16=args.bf16,
         )
         results[size_name] = result
 
