@@ -57,6 +57,13 @@ class BenchmarkResult:
     step_std_ms: float
 
 
+DTYPE_MAP = {
+    "fp32": None,  # No autocast
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+}
+
+
 def benchmark_model(
     config: ModelConfig,
     size_name: str,
@@ -67,7 +74,7 @@ def benchmark_model(
     warmup_steps: int,
     steps: int,
     device: str,
-    bf16: bool = False,
+    dtype: str = "fp32",
 ) -> BenchmarkResult:
     """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
     model = BasicsTransformerLM(
@@ -81,7 +88,7 @@ def benchmark_model(
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
-    console.rule(f"[bold blue]{size_name}")
+    console.rule(f"[bold blue]{size_name}[/bold blue] [magenta]{dtype}[/magenta]")
     console.print(
         f"d_model={config.d_model}, d_ff={config.d_ff}, "
         f"num_layers={config.num_layers}, num_heads={config.num_heads}, "
@@ -96,7 +103,8 @@ def benchmark_model(
     forward_times = []
     backward_times = []
     nvtx_context = torch.autograd.profiler.emit_nvtx() if device == "cuda" else contextlib.nullcontext()
-    autocast_context = torch.autocast(device, dtype=torch.bfloat16) if bf16 else contextlib.nullcontext()
+    autocast_dtype = DTYPE_MAP[dtype]
+    autocast_context = torch.autocast(device, dtype=autocast_dtype) if autocast_dtype else contextlib.nullcontext()
     with nvtx_context, autocast_context:
         # warmup (full forward + backward)
         with torch.profiler.record_function("warmup"):
@@ -176,7 +184,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 mixed precision")
+    parser.add_argument("--dtype", type=str, default="fp32", help="Dtype(s) to benchmark: comma-separated (e.g., 'fp32,bf16')")
 
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--context-length", type=int, default=256)
@@ -186,7 +194,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_default_device()
-    console.print(f"Using device: [bold cyan]{device}[/bold cyan]" + (", [bold magenta]bf16[/bold magenta]" if args.bf16 else ""))
+    console.print(f"Using device: [bold cyan]{device}[/bold cyan]")
 
     if args.size == "all":
         sizes_to_run = list(MODEL_CONFIGS.keys())
@@ -196,12 +204,25 @@ if __name__ == "__main__":
             if s not in MODEL_CONFIGS:
                 parser.error(f"invalid size '{s}' (choose from {list(MODEL_CONFIGS.keys())})")
 
+    dtypes_to_run = [d.strip() for d in args.dtype.split(",")]
+    for d in dtypes_to_run:
+        if d not in DTYPE_MAP:
+            parser.error(f"invalid dtype '{d}' (choose from {list(DTYPE_MAP.keys())})")
+
+    # Create all (size, dtype) combinations
+    @dataclass
+    class BenchmarkRun:
+        size: str
+        dtype: str
+        config: ModelConfig
+
+    runs = [BenchmarkRun(size=s, dtype=d, config=MODEL_CONFIGS[s]) for s in sizes_to_run for d in dtypes_to_run]
+
     results = {}
-    for size_name in sizes_to_run:
-        config = MODEL_CONFIGS[size_name]
+    for run in runs:
         result = benchmark_model(
-            config=config,
-            size_name=size_name,
+            config=run.config,
+            size_name=run.size,
             vocab_size=args.vocab_size,
             context_length=args.context_length,
             batch_size=args.batch_size,
@@ -209,21 +230,23 @@ if __name__ == "__main__":
             warmup_steps=args.warmup_steps,
             steps=args.steps,
             device=device,
-            bf16=args.bf16,
+            dtype=run.dtype,
         )
-        results[size_name] = result
+        results[(run.size, run.dtype)] = result
 
     if len(results) > 1:
         console.print()
         table = Table(title="Summary")
         table.add_column("Size", style="cyan", justify="right")
+        table.add_column("Dtype", style="magenta", justify="right")
         table.add_column("Forward (ms)", justify="right")
         table.add_column("Backward (ms)", justify="right")
         table.add_column("Full Step (ms)", justify="right", style="bold")
 
-        for size_name, r in results.items():
+        for (size_name, dtype), r in results.items():
             table.add_row(
                 size_name,
+                dtype,
                 f"{r.forward_avg_ms:.2f} ± {r.forward_std_ms:.2f}",
                 f"{r.backward_avg_ms:.2f} ± {r.backward_std_ms:.2f}",
                 f"{r.step_avg_ms:.2f} ± {r.step_std_ms:.2f}",
