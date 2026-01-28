@@ -75,6 +75,7 @@ def benchmark_model(
     steps: int,
     device: str,
     dtype: str = "fp32",
+    memory_snapshot: str | None = None,
 ) -> BenchmarkResult:
     """Benchmark a model configuration. Returns BenchmarkResult with timing stats."""
     model = BasicsTransformerLM(
@@ -117,6 +118,10 @@ def benchmark_model(
                 model.zero_grad()
         sync_device(device)
 
+        # Start memory recording after warmup
+        if memory_snapshot and device == "cuda":
+            torch.cuda.memory._record_memory_history(max_entries=1_000_000)
+
         # Benchmark - time forward and backward separately in the same loop
         with torch.profiler.record_function("benchmark"):
             for i in range(warmup_steps, total_steps):
@@ -141,6 +146,12 @@ def benchmark_model(
                 backward_times.append(bwd_end - bwd_start)
 
                 model.zero_grad()
+
+        # Stop memory recording and save snapshot
+        if memory_snapshot and device == "cuda":
+            torch.cuda.memory._dump_snapshot(memory_snapshot)
+            torch.cuda.memory._record_memory_history(enabled=None)
+            console.print(f"  Memory snapshot saved to [bold]{memory_snapshot}[/bold]")
 
     forward_times_ms = torch.tensor(forward_times) * 1000
     backward_times_ms = torch.tensor(backward_times) * 1000
@@ -185,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--dtype", type=str, default="fp32", help="Dtype(s) to benchmark: comma-separated (e.g., 'fp32,bf16')")
+    parser.add_argument("--memory-snapshot", action="store_true", help="Save CUDA memory snapshot (memory_{size}_{dtype}.pickle)")
 
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--context-length", type=int, default=256)
@@ -220,6 +232,7 @@ if __name__ == "__main__":
 
     results = {}
     for run in runs:
+        snapshot_file = f"memory_{run.size}_{run.dtype}.pickle" if args.memory_snapshot else None
         result = benchmark_model(
             config=run.config,
             size_name=run.size,
@@ -231,6 +244,7 @@ if __name__ == "__main__":
             steps=args.steps,
             device=device,
             dtype=run.dtype,
+            memory_snapshot=snapshot_file,
         )
         results[(run.size, run.dtype)] = result
 
